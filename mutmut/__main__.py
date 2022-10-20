@@ -466,8 +466,7 @@ def time_test_suite(swallow_output, test_command, using_testmon, current_hash_of
     def feedback(line):
         if not swallow_output:
             print(line)
-        if not no_progress:
-            print_status('Running...')
+        print_status('Running...')
         output.append(line)
 
     returncode = popen_streaming_output(test_command, feedback)

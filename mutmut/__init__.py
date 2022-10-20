@@ -1,37 +1,23 @@
 # -*- coding: utf-8 -*-
 import fnmatch
 import itertools
-import multiprocessing
 import os
 import re
 import shlex
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from configparser import (
-    ConfigParser,
-    NoOptionError,
-    NoSectionError,
-)
-from copy import copy as copy_obj, deepcopy
-import toml
 from configparser import ConfigParser
 from copy import copy as copy_obj
+import toml
 from functools import wraps
 from io import (
     open,
     TextIOBase,
 )
 from os.path import isdir
-from shutil import (
-    move,
-    copy,
-)
-from threading import (
-    Timer,
-    Thread,
-    RLock
-)
+from shutil import copy
+from threading import Timer, RLock
 from time import time
 
 from parso import parse
@@ -912,21 +898,20 @@ class Progress(object):
         self.no_progress = no_progress
 
     def print(self):
-        with self._lock:
-            print_status('{}/{}  {} {}  {} {}  {} {}  {} {}  {} {}'.format(
-                self.progress,
-                self.total,
-                self.output_legend["killed"],
-                self.killed_mutants,
-                self.output_legend["timeout"],
-                self.surviving_mutants_timeout,
-                self.output_legend["suspicious"],
-                self.suspicious_mutants,
-                self.output_legend["survived"],
-                self.surviving_mutants,
-                self.output_legend["skipped"],
-                self.skipped)
-            )
+        print_status('{}/{}  {} {}  {} {}  {} {}  {} {}  {} {}'.format(
+            self.progress,
+            self.total,
+            self.output_legend["killed"],
+            self.killed_mutants,
+            self.output_legend["timeout"],
+            self.surviving_mutants_timeout,
+            self.output_legend["suspicious"],
+            self.suspicious_mutants,
+            self.output_legend["survived"],
+            self.surviving_mutants,
+            self.output_legend["skipped"],
+            self.skipped)
+        )
 
     def register(self, status):
         with self._lock:
