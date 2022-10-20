@@ -1,33 +1,42 @@
 # -*- coding: utf-8 -*-
 import fnmatch
 import itertools
+import multiprocessing
 import os
 import re
 import shlex
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from configparser import ConfigParser
-from copy import copy as copy_obj
-import toml
+from configparser import (
+    ConfigParser,
+    NoOptionError,
+    NoSectionError,
+)
+from copy import copy as copy_obj, deepcopy
 from functools import wraps
 from io import (
     open,
     TextIOBase,
 )
 from os.path import isdir
-from shutil import copy
-from threading import Timer, RLock
+from shutil import (
+    move,
+    copy,
+)
+from threading import (
+    Timer,
+    Thread,
+    RLock
+)
 from time import time
 
 from parso import parse
 from parso.python.tree import Name, Number, Keyword
 
-__version__ = '2.4.1'
+__version__ = '2.1.0'
 
 
-if os.getcwd() not in sys.path:
-    sys.path.insert(0, os.getcwd())
 try:
     import mutmut_config
 except ImportError:
@@ -181,14 +190,14 @@ BAD_SURVIVED = 'bad_survived'
 SKIPPED = 'skipped'
 
 
-MUTANT_STATUSES = {
-    "killed": OK_KILLED,
-    "timeout": BAD_TIMEOUT,
-    "suspicious": OK_SUSPICIOUS,
-    "survived": BAD_SURVIVED,
-    "skipped": SKIPPED,
-    "untested": UNTESTED,
-}
+mutant_statuses = [
+    UNTESTED,
+    OK_KILLED,
+    OK_SUSPICIOUS,
+    BAD_TIMEOUT,
+    BAD_SURVIVED,
+    SKIPPED,
+]
 
 
 def number_mutation(value, **_):
@@ -218,24 +227,18 @@ def number_mutation(value, **_):
 
     try:
         parsed = int(value, base=base)
-        result = repr(parsed + 1)
     except ValueError:
         # Since it wasn't an int, it must be a float
         parsed = float(value)
-        # This avoids all very small numbers becoming 1.0, and very
-        # large numbers not changing at all
-        if (1e-5 < abs(parsed) < 1e5) or (parsed == 0.0):
-            result = repr(parsed + 1)
-        else:
-            result = repr(parsed * 2)
 
+    result = repr(parsed + 1)
     if not result.endswith(suffix):
         result += suffix
     return result
 
 
 def string_mutation(value, **_):
-    prefix = value[:min(x for x in [value.find('"'), value.find("'")] if x != -1)]
+    prefix = value[:min([x for x in [value.find('"'), value.find("'")] if x != -1])]
     value = value[len(prefix):]
 
     if value.startswith('"""') or value.startswith("'''"):
@@ -530,9 +533,7 @@ class Context(object):
             }
         return self._pragma_no_mutate_lines
 
-    def should_mutate(self, node):
-        if self.config and node.type not in self.config.mutation_types_to_apply:
-            return False
+    def should_mutate(self):
         if self.mutation_id == ALL:
             return True
         return self.mutation_id in (ALL, self.mutation_id_of_current_index)
@@ -630,7 +631,7 @@ def mutate_node(node, context):
                 if new is not None and new != old:
                     if hasattr(mutmut_config, 'pre_mutation_ast'):
                         mutmut_config.pre_mutation_ast(context=context)
-                    if context.should_mutate(node):
+                    if context.should_mutate():
                         context.performed_mutation_ids.append(context.mutation_id_of_current_index)
                         setattr(node, key, new)
                     context.index += 1
@@ -691,7 +692,6 @@ def mutate_file(backup, context):
     return original, mutated
 
 
-
 def run_mutation_procedure(context: Context, progress) -> str:
     from mutmut.cache import update_mutant_status
 
@@ -707,6 +707,7 @@ def run_mutation_procedure(context: Context, progress) -> str:
     )
     progress.print()
     return status
+
 
 def run_mutation(context: Context) -> str:
     """
@@ -725,8 +726,6 @@ def run_mutation(context: Context) -> str:
             mutmut_config.pre_mutation(context=context)
         except SkipException:
             return SKIPPED
-        if context.skip:
-            return SKIPPED
 
     if config.pre_mutation:
         result = subprocess.check_output(config.pre_mutation, shell=True).decode().strip()
@@ -736,11 +735,7 @@ def run_mutation(context: Context) -> str:
     try:
         start = time()
         try:
-            survived = tests_pass(config=config, callback=callback)
-            if survived and config.test_command != config._default_test_command and config.rerun_all:
-                # rerun the whole test suite to be sure the mutant can not be killed by other tests
-                config.test_command = config._default_test_command
-                survived = tests_pass(config=config, callback=callback)
+            survived = tests_pass(context)
         except TimeoutError:
             return BAD_TIMEOUT
 
@@ -765,27 +760,26 @@ def run_mutation(context: Context) -> str:
 class Config(object):
     def __init__(self, swallow_output, test_command, covered_lines_by_filename,
                  baseline_time_elapsed, test_time_multiplier, test_time_base,
-                 dict_synonyms, total, using_testmon,
+                 backup, dict_synonyms, total, using_testmon, cache_only,
                  tests_dirs, hash_of_tests, pre_mutation, post_mutation,
-                 coverage_data, paths_to_mutate, mutation_types_to_apply, no_progress, rerun_all):
+                 coverage_data, paths_to_mutate):
         self.swallow_output = swallow_output
-        self.test_command = self._default_test_command = test_command
+        self.test_command = test_command
         self.covered_lines_by_filename = covered_lines_by_filename
         self.baseline_time_elapsed = baseline_time_elapsed
         self.test_time_multipler = test_time_multiplier
         self.test_time_base = test_time_base
+        self.backup = backup
         self.dict_synonyms = dict_synonyms
         self.total = total
         self.using_testmon = using_testmon
+        self.cache_only = cache_only
         self.tests_dirs = tests_dirs
         self.hash_of_tests = hash_of_tests
         self.post_mutation = post_mutation
         self.pre_mutation = pre_mutation
         self.coverage_data = coverage_data
         self.paths_to_mutate = paths_to_mutate
-        self.mutation_types_to_apply = mutation_types_to_apply
-        self.no_progress = no_progress
-        self.rerun_all = rerun_all
 
 
 def tests_pass(context: Context) -> bool:
@@ -808,30 +802,22 @@ def tests_pass(context: Context) -> bool:
     return returncode == 0 or (config.using_testmon and returncode == 5)
 
 
-def config_from_file(**defaults):
-    def config_from_pyproject_toml() -> dict:
-        try:
-            return toml.load('pyproject.toml')['tool']['mutmut']
-        except (FileNotFoundError, KeyError):
-            return {}
-
-    def config_from_setup_cfg() -> dict:
-        config_parser = ConfigParser()
-        config_parser.read('setup.cfg')
-
-        try:
-            return dict(config_parser['mutmut'])
-        except KeyError:
-            return {}
-
-    config = config_from_pyproject_toml() or config_from_setup_cfg()
-
+def config_from_setup_cfg(**defaults):
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
+            config_parser = ConfigParser()
+            config_parser.read('setup.cfg')
+
+            def s(key, default):
+                try:
+                    return config_parser.get('mutmut', key)
+                except (NoOptionError, NoSectionError):
+                    return default
+
             for k in list(kwargs.keys()):
                 if not kwargs[k]:
-                    kwargs[k] = config.get(k, defaults.get(k))
+                    kwargs[k] = s(k, defaults.get(k))
             f(*args, **kwargs)
 
         return wrapper
@@ -880,12 +866,11 @@ def guess_paths_to_mutate():
     raise FileNotFoundError(
         'Could not figure out where the code to mutate is. '
         'Please specify it on the command line using --paths-to-mutate, '
-        'or by adding "paths_to_mutate=code_dir" in pyproject.toml or setup.cfg to the [mutmut] '
-        'section.')
+        'or by adding "paths_to_mutate=code_dir" in setup.cfg to the [mutmut] section.')
 
 
 class Progress(object):
-    def __init__(self, total, output_legend, no_progress=False):
+    def __init__(self, total, output_legend):
         self._lock = RLock()
         self.total = total
         self.output_legend = output_legend
@@ -895,23 +880,23 @@ class Progress(object):
         self.surviving_mutants = 0
         self.surviving_mutants_timeout = 0
         self.suspicious_mutants = 0
-        self.no_progress = no_progress
 
     def print(self):
-        print_status('{}/{}  {} {}  {} {}  {} {}  {} {}  {} {}'.format(
-            self.progress,
-            self.total,
-            self.output_legend["killed"],
-            self.killed_mutants,
-            self.output_legend["timeout"],
-            self.surviving_mutants_timeout,
-            self.output_legend["suspicious"],
-            self.suspicious_mutants,
-            self.output_legend["survived"],
-            self.surviving_mutants,
-            self.output_legend["skipped"],
-            self.skipped)
-        )
+        with self._lock:
+            print_status('{}/{}  {} {}  {} {}  {} {}  {} {}  {} {}'.format(
+                self.progress,
+                self.total,
+                self.output_legend["killed"],
+                self.killed_mutants,
+                self.output_legend["timeout"],
+                self.surviving_mutants_timeout,
+                self.output_legend["suspicious"],
+                self.suspicious_mutants,
+                self.output_legend["survived"],
+                self.surviving_mutants,
+                self.output_legend["skipped"],
+                self.skipped)
+            )
 
     def register(self, status):
         with self._lock:
@@ -964,10 +949,9 @@ def popen_streaming_output(cmd, callback, timeout=None):
     """
     if os.name == 'nt':  # pragma: no cover
         process = subprocess.Popen(
-            cmd,
+            shlex.split(cmd),
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            shell=True,
+            stderr=subprocess.PIPE
         )
         stdout = process.stdout
     else:
@@ -1007,7 +991,7 @@ def popen_streaming_output(cmd, callback, timeout=None):
                     if not line:
                         break
                     callback(line)
-        except OSError:
+        except (IOError, OSError):
             # This seems to happen on some platforms, including TravisCI.
             # It seems like it's ok to just let this pass here, you just
             # won't get as nice feedback.
@@ -1069,7 +1053,7 @@ def hammett_tests_pass(config, callback):
 
     modules_to_force_unload = {x.partition(os.sep)[0].replace('.py', '') for x in config.paths_to_mutate}
 
-    for module_name in sorted(set(sys.modules.keys()) - set(modules_before), reverse=True):
+    for module_name in list(sorted(set(sys.modules.keys()) - set(modules_before), reverse=True)):
         if any(module_name.startswith(x) for x in modules_to_force_unload) or module_name.startswith('tests') or module_name.startswith('django'):
             del sys.modules[module_name]
 
@@ -1112,8 +1096,7 @@ def run_mutation_tests(config, progress, mutations_by_file):
 
 def read_coverage_data():
     """
-    Reads the coverage database and returns a dictionary which maps the filenames to the covered lines and their contexts.
-    :rtype: dict[str, dict[int, list[str]]]
+    :rtype: CoverageData or None
     """
     try:
         # noinspection PyPackageRequirements,PyUnresolvedReferences
@@ -1123,7 +1106,7 @@ def read_coverage_data():
     cov = Coverage('.coverage')
     cov.load()
     data = cov.get_data()
-    return {filepath: data.contexts_by_lineno(filepath) for filepath in data.measured_files()}
+    return {filepath: data.lines(filepath) for filepath in data.measured_files()}
 
 
 def read_patch_data(patch_file_path):

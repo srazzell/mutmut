@@ -20,7 +20,3 @@ Credits
 * Emil Stenström <emil@emilstenstrom.se>
 * Roxane Bellott <roxane.bellot@gmail.com>
 * Tomáš Chvátal <tchvatal@suse.com>
-* Felix Divo <https://github.com/felixdivo>
-* Andreas Finkler <andi.finkler@gmail.com>
-* sed-i
-* Peter Hill <peter.hill@york.ac.uk>

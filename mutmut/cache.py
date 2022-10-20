@@ -15,7 +15,7 @@ from junit_xml import TestSuite, TestCase
 from pony.orm import Database, Required, db_session, Set, Optional, select, \
     PrimaryKey, RowNotFound, ERDiagramError, OperationalError
 
-from mutmut import MUTANT_STATUSES, BAD_TIMEOUT, OK_SUSPICIOUS, BAD_SURVIVED, UNTESTED, \
+from mutmut import BAD_TIMEOUT, OK_SUSPICIOUS, BAD_SURVIVED, UNTESTED, \
     OK_KILLED, RelativeMutationID, Context, mutate
 
 db = Database()
@@ -102,9 +102,7 @@ def hash_of_tests(tests_dirs):
     for tests_dir in tests_dirs:
         for root, dirs, files in os.walk(tests_dir):
             for filename in files:
-                if not filename.endswith('.py'):
-                    continue
-                if not filename.startswith('test') and not filename.endswith('_tests.py') and 'test' not in root:
+                if not filename.endswith(".py"):
                     continue
                 with open(os.path.join(root, filename), 'rb') as f:
                     m.update(f.read())
@@ -149,7 +147,7 @@ def ranges(numbers):
 
 @init_db
 @db_session
-def print_result_cache(show_diffs=False, dict_synonyms=None, only_this_file=None):
+def print_result_cache(show_diffs=False, dict_synonyms=None, print_only_filename=None, only_this_file=None):
     print('To apply a mutant on disk:')
     print('    mutmut apply <id>')
     print('')
@@ -158,11 +156,14 @@ def print_result_cache(show_diffs=False, dict_synonyms=None, only_this_file=None
     print('')
 
     def print_stuff(title, mutant_query):
-        mutant_list = sorted(mutant_query, key=lambda x: x.line.sourcefile.filename)
+        mutant_list = list(sorted(mutant_query, key=lambda x: x.line.sourcefile.filename))
         if mutant_list:
             print('')
             print("{} ({})".format(title, len(mutant_list)))
             for filename, mutants in groupby(mutant_list, key=lambda x: x.line.sourcefile.filename):
+                if print_only_filename is not None and print_only_filename != filename:
+                    continue
+
                 if only_this_file and filename != only_this_file:
                     continue
 
@@ -184,14 +185,6 @@ def print_result_cache(show_diffs=False, dict_synonyms=None, only_this_file=None
     print_stuff('Suspicious 🤔', select(x for x in Mutant if x.status == OK_SUSPICIOUS))
     print_stuff('Survived 🙁', select(x for x in Mutant if x.status == BAD_SURVIVED))
     print_stuff('Untested/skipped', select(x for x in Mutant if x.status == UNTESTED))
-
-
-@init_db
-@db_session
-def print_result_ids_cache(desired_status):
-    status = MUTANT_STATUSES[desired_status]
-    mutant_query = select(x for x in Mutant if x.status == status)
-    print(" ".join(str(mutant.id) for mutant in mutant_query))
 
 
 def get_unified_diff(argument, dict_synonyms, update_cache=True, source=None):
@@ -234,7 +227,7 @@ def print_result_cache_junitxml(dict_synonyms, suspicious_policy, untested_polic
     mutant_list = list(select(x for x in Mutant))
     for filename, mutants in groupby(mutant_list, key=lambda x: x.line.sourcefile.filename):
         for mutant in mutants:
-            tc = TestCase("Mutant #{}".format(mutant.id), file=filename, line=mutant.line.line_number + 1, stdout=mutant.line.line)
+            tc = TestCase("Mutant #{}".format(mutant.id), file=filename, line=mutant.line.line_number, stdout=mutant.line.line)
             if mutant.status == BAD_SURVIVED:
                 tc.add_failure_info(message=mutant.status, output=get_unified_diff(mutant.id, dict_synonyms))
             if mutant.status == BAD_TIMEOUT:

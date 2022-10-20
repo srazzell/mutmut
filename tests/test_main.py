@@ -19,13 +19,10 @@ from click.testing import CliRunner
 
 from mutmut import (
     compute_exit_code,
-    mutations_by_type,
     popen_streaming_output,
     Progress,
     python_source_files,
     read_coverage_data,
-    MUTANT_STATUSES,
-    __version__,
 )
 from mutmut.__main__ import climain
 
@@ -87,29 +84,6 @@ def single_mutant_filesystem(tmpdir):
     mutmut.cache.db.schema = None
 
 
-@pytest.fixture
-def surviving_mutants_filesystem(tmpdir):
-    foo_py = """
-def foo(a, b):
-    result = a + b
-    return result
-"""
-
-    test_py = """
-def test_nothing(): assert True
-"""
-
-    create_filesystem(tmpdir, foo_py, test_py)
-
-    yield tmpdir
-
-    # This is a hack to get pony to forget about the old db file
-    # otherwise Pony thinks we've already created the tables
-    import mutmut.cache
-    mutmut.cache.db.provider = None
-    mutmut.cache.db.schema = None
-
-
 def create_filesystem(tmpdir, file_to_mutate_contents, test_file_contents):
     test_dir = str(tmpdir)
     os.chdir(test_dir)
@@ -130,15 +104,11 @@ runner=python -m hammett -x
         f.write(test_file_contents)
 
 
-def test_print_version():
-    assert CliRunner().invoke(climain, ['version']).output.strip() == f'mutmut version {__version__}'
-
-
 def test_compute_return_code():
     # mock of Config for ease of testing
     class MockProgress(Progress):
         def __init__(self, killed_mutants, surviving_mutants,
-                     surviving_mutants_timeout, suspicious_mutants, **_):
+                     surviving_mutants_timeout, suspicious_mutants):
             super(MockProgress, self).__init__(total=0, output_legend={})
             self.killed_mutants = killed_mutants
             self.surviving_mutants = surviving_mutants
@@ -182,7 +152,7 @@ def test_compute_return_code():
     assert compute_exit_code(MockProgress(1, 1, 1, 1), Exception()) == 15
 
 
-def test_read_coverage_data():
+def test_read_coverage_data(filesystem):
     assert read_coverage_data() == {}
 
 
@@ -195,7 +165,7 @@ def test_read_coverage_data():
         ([os.path.join(".", "foo.py")], ".", [os.path.join(".", "tests")])
     ]
 )
-def test_python_source_files(expected, source_path, tests_dirs):
+def test_python_source_files(expected, source_path, tests_dirs, filesystem):
     assert list(python_source_files(source_path, tests_dirs)) == expected
 
 
@@ -281,20 +251,6 @@ def test_simple_apply(filesystem):
         assert f.read() != file_to_mutate_contents
 
 
-def test_simply_apply_with_backup(filesystem):
-    result = CliRunner().invoke(climain, ['run', '-s', '--paths-to-mutate=foo.py', "--test-time-base=15.0"], catch_exceptions=False)
-    print(repr(result.output))
-    assert result.exit_code == 0
-
-    result = CliRunner().invoke(climain, ['apply', '--backup', '1'], catch_exceptions=False)
-    print(repr(result.output))
-    assert result.exit_code == 0
-    with open(os.path.join(str(filesystem), 'foo.py')) as f:
-        assert f.read() != file_to_mutate_contents
-    with open(os.path.join(str(filesystem), 'foo.py.bak')) as f:
-        assert f.read() == file_to_mutate_contents
-
-
 def test_full_run_no_surviving_mutants(filesystem):
     result = CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--test-time-base=15.0"], catch_exceptions=False)
     print(repr(result.output))
@@ -324,51 +280,6 @@ def test_full_run_no_surviving_mutants_junit(filesystem):
     assert int(root.attrib['failures']) == 0
     assert int(root.attrib['errors']) == 0
     assert int(root.attrib['disabled']) == 0
-
-
-def test_mutant_only_killed_after_rerun(filesystem):
-    mutmut_config = filesystem / "mutmut_config.py"
-    mutmut_config.write("""
-def pre_mutation(context):
-    context.config.test_command = "echo True"
-""")
-    CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--test-time-base=15.0", "--rerun-all"], catch_exceptions=False)
-    result = CliRunner().invoke(climain, ['results'], catch_exceptions=False)
-    print(repr(result.output))
-    assert result.exit_code == 0
-    assert result.output.strip() == u"""
-To apply a mutant on disk:
-    mutmut apply <id>
-
-To show a mutant:
-    mutmut show <id>
-""".strip()
-
-
-def test_no_rerun_if_not_specified(filesystem):
-    mutmut_config = filesystem / "mutmut_config.py"
-    mutmut_config.write("""
-def pre_mutation(context):
-    context.config.test_command = "echo True"
-""")
-    CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--test-time-base=15.0"], catch_exceptions=False)
-    result = CliRunner().invoke(climain, ['results'], catch_exceptions=False)
-    print(repr(result.output))
-    assert result.exit_code == 0
-    assert result.output.strip() == u"""
-To apply a mutant on disk:
-    mutmut apply <id>
-
-To show a mutant:
-    mutmut show <id>
-
-
-Survived 🙁 (14)
-
----- foo.py (14) ----
-
-1-14
-""".strip()
 
 
 def test_full_run_one_surviving_mutant(filesystem):
@@ -439,7 +350,7 @@ Suspicious 🤔 ({EXPECTED_MUTANTS})
 """.format(EXPECTED_MUTANTS=EXPECTED_MUTANTS).strip()
 
 
-def test_full_run_all_suspicious_mutant_junit():
+def test_full_run_all_suspicious_mutant_junit(filesystem):
     result = CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--test-time-multiplier=0.0"], catch_exceptions=False)
     print(repr(result.output))
     assert result.exit_code == 8
@@ -482,12 +393,13 @@ def test_use_coverage(filesystem):
 
     # remove existent path to check if an exception is thrown
     os.unlink(os.path.join(str(filesystem), 'foo.py'))
-    result = CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--test-time-base=15.0", "--use-coverage"],
-                                catch_exceptions=False)
-    assert result.exit_code == 2
+    with pytest.raises(ValueError,
+                       match=r'^Filepaths in .coverage not recognized, try recreating the .coverage file manually.$'):
+        CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--test-time-base=15.0", "--use-coverage"],
+                           catch_exceptions=False)
 
 
-def test_use_patch_file():
+def test_use_patch_file(filesystem):
     patch_contents = """diff --git a/foo.py b/foo.py
 index b9a5fb4..c6a496c 100644
 --- a/foo.py
@@ -531,171 +443,7 @@ def test_pre_and_post_mutation_hook(single_mutant_filesystem, tmpdir):
     assert result.output.index("pre mutation stub") < result.output.index("post mutation stub")
 
 
-def test_simple_output():
+def test_simple_output(filesystem):
     result = CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--simple-output"], catch_exceptions=False)
     print(repr(result.output))
     assert '14/14  KILLED 14  TIMEOUT 0  SUSPICIOUS 0  SURVIVED 0  SKIPPED 0' in repr(result.output)
-
-
-def test_output_result_ids():
-    # Generate the results
-    CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--simple-output"], catch_exceptions=False)
-    # Check the output for the parts that are zero
-    for attribute in set(MUTANT_STATUSES.keys()) - {"killed"}:
-        assert CliRunner().invoke(climain, ['result-ids', attribute], catch_exceptions=False).output.strip() == ""
-    # Check that "killed" contains all IDs
-    killed_list = " ".join(str(num) for num in range(1, 15))
-    assert CliRunner().invoke(climain, ['result-ids', "killed"], catch_exceptions=False).output.strip() == killed_list
-
-
-def test_enable_single_mutation_type():
-    result = CliRunner().invoke(climain, [
-        'run', '--paths-to-mutate=foo.py', "--simple-output", "--enable-mutation-types=operator"
-    ], catch_exceptions=False)
-    print(repr(result.output))
-    assert '3/3  KILLED 3  TIMEOUT 0  SUSPICIOUS 0  SURVIVED 0  SKIPPED 0' in repr(result.output)
-
-
-def test_enable_multiple_mutation_types():
-    result = CliRunner().invoke(climain, [
-        'run', '--paths-to-mutate=foo.py', "--simple-output", "--enable-mutation-types=operator,number"
-    ], catch_exceptions=False)
-    print(repr(result.output))
-    assert '8/8  KILLED 8  TIMEOUT 0  SUSPICIOUS 0  SURVIVED 0  SKIPPED 0' in repr(result.output)
-
-
-def test_disable_single_mutation_type():
-    result = CliRunner().invoke(climain, [
-        'run', '--paths-to-mutate=foo.py', "--simple-output", "--disable-mutation-types=number"
-    ], catch_exceptions=False)
-    print(repr(result.output))
-    assert '9/9  KILLED 9  TIMEOUT 0  SUSPICIOUS 0  SURVIVED 0  SKIPPED 0' in repr(result.output)
-
-
-def test_disable_multiple_mutation_types():
-    result = CliRunner().invoke(climain, [
-        'run', '--paths-to-mutate=foo.py', "--simple-output", "--disable-mutation-types=operator,number"
-    ], catch_exceptions=False)
-    print(repr(result.output))
-    assert '6/6  KILLED 6  TIMEOUT 0  SUSPICIOUS 0  SURVIVED 0  SKIPPED 0' in repr(result.output)
-
-
-@pytest.mark.parametrize(
-    "option", ["--enable-mutation-types", "--disable-mutation-types"]
-)
-def test_select_unknown_mutation_type(option):
-    result = CliRunner().invoke(
-        climain,
-        [
-            "run",
-            f"{option}=foo,bar",
-        ]
-    )
-    assert result.exception.code == 2
-    assert f"The following are not valid mutation types: bar, foo. Valid mutation types are: {', '.join(mutations_by_type.keys())}" in result.output, result.output
-
-
-def test_enable_and_disable_mutation_type_are_exclusive():
-    result = CliRunner().invoke(
-        climain,
-        [
-            "run",
-            "--enable-mutation-types=operator",
-            "--disable-mutation-types=string",
-        ]
-    )
-    assert result.exception.code == 2
-    assert "You can't combine --disable-mutation-types and --enable-mutation-types" in result.output
-
-
-@pytest.mark.parametrize(
-    "mutation_type, expected_mutation",
-    [
-        ("expr_stmt", "result = None"),
-        ("operator", "result = a - b"),
-    ]
-)
-def test_show_mutant_after_run_with_disabled_mutation_types(surviving_mutants_filesystem, mutation_type, expected_mutation):
-    """Test for issue #234: ``mutmut show <id>`` did not show the correct mutant if ``mutmut run`` was
-    run with ``--enable-mutation-types`` or ``--disable-mutation-types``."""
-    CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', f'--enable-mutation-types={mutation_type}'], catch_exceptions=False)
-    result = CliRunner().invoke(climain, ['show', '1'])
-    assert f"""
- def foo(a, b):
--    result = a + b
-+    {expected_mutation}
-     return result
-""" in result.output
-
-
-def test_run_multiple_times_with_different_mutation_types():
-    """Running multiple times with different mutation types enabled should append the new mutants to the cache without
-    altering existing mutants."""
-    CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', '--enable-mutation-types=number'], catch_exceptions=False)
-    result = CliRunner().invoke(climain, ['show', '1'])
-    assert """
--c = 1
-+c = 2
-""" in result.output
-    CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', '--enable-mutation-types=operator'], catch_exceptions=False)
-    result = CliRunner().invoke(climain, ['show', '1'])
-    assert """
--c = 1
-+c = 2
-""" in result.output, "mutant ID has changed!"
-    result = CliRunner().invoke(climain, ['show', '8'])
-    assert """
--c += 1
-+c -= 1
-""" in result.output, "no new mutation types added!"
-
-
-def test_show(surviving_mutants_filesystem):
-    CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--test-time-base=15.0"], catch_exceptions=False)
-    result = CliRunner().invoke(climain, ['show'])
-    assert result.output.strip() == """
-To apply a mutant on disk:
-    mutmut apply <id>
-
-To show a mutant:
-    mutmut show <id>
-
-
-Survived 🙁 (2)
-
----- foo.py (2) ----
-
-1-2
-""".strip()
-
-
-def test_show_single_id(surviving_mutants_filesystem, testdata):
-    CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--test-time-base=15.0"], catch_exceptions=False)
-    result = CliRunner().invoke(climain, ['show', '1'])
-    assert result.output.strip() == (testdata / "surviving_mutants_show_id_1.txt").read_text("utf8").strip()
-
-
-def test_show_all(surviving_mutants_filesystem, testdata):
-    CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--test-time-base=15.0"], catch_exceptions=False)
-    result = CliRunner().invoke(climain, ['show', 'all'])
-    assert result.output.strip() == (testdata / "surviving_mutants_show_all.txt").read_text("utf8").strip()
-
-
-def test_show_for_file(surviving_mutants_filesystem, testdata):
-    CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--test-time-base=15.0"], catch_exceptions=False)
-    result = CliRunner().invoke(climain, ['show', 'foo.py'])
-    assert result.output.strip() == (testdata / "surviving_mutants_show_foo_py.txt").read_text("utf8").strip()
-
-
-def test_html_output(surviving_mutants_filesystem):
-    result = CliRunner().invoke(climain, ['run', '--paths-to-mutate=foo.py', "--test-time-base=15.0"], catch_exceptions=False)
-    print(repr(result.output))
-    result = CliRunner().invoke(climain, ['html'])
-    assert os.path.isfile("html/index.html")
-    with open("html/index.html") as f:
-        assert f.read() == (
-            '<h1>Mutation testing report</h1>'
-            'Killed 0 out of 2 mutants'
-            '<table><thead><tr><th>File</th><th>Total</th><th>Killed</th><th>% killed</th><th>Survived</th></thead>'
-            '<tr><td><a href="foo.py.html">foo.py</a></td><td>2</td><td>0</td><td>0.00</td><td>2</td>'
-            '</table></body></html>')
